@@ -171,7 +171,8 @@ class Node:
                         "code": Error.NOT_SUPPORTED,
                         "text": "RPC type is not supported",
                     }
-                resp_body["in_reply_to"] = req.body["msg_id"]
+                if "msg_id" in req.body:
+                    resp_body["in_reply_to"] = req.body["msg_id"]
                 await self._send(Request(self.node_id, req.src, resp_body))
 
             self.spawn(thunk(req))
