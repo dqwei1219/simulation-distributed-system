@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 from maelstrom import Node, Body, Request
-import asyncio
 
 node = Node()
 # No need lock becasue event loop is a single thread

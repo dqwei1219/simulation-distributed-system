@@ -1,59 +1,60 @@
 #!/usr/bin/env python3
 from maelstrom import Node, Body, Request
-from collections import defaultdict, deque
 import asyncio
 
 node = Node()
-seen = set()
-messages_lock = asyncio.Lock()
-pending_messages = defaultdict(deque) 
-peers = set()
+messages = set()
+cond = asyncio.Condition()
 
-async def worker(peer):
+async def add_message(message_to_add: set[int]) -> None:
+    # Do nothinng if it is a subset of set
+    if message_to_add <= messages:
+        return 
+    messages.update(message_to_add)
+    async with cond:
+        cond.notify_all()
+
+async def worker(neighbor):
+    sent = set()
     while True:
-        messages = pending_messages[peer]
-        while messages:
-            msg = messages.popleft()
-            try:
-                resp = await node.rpc(peer, {"type": "broadcast", "message": msg})
-                if resp["type"] != "broadcast_ok":
-                    messages.appendleft(msg)  # Re-insert at front to retry immediately
-                    break
-            except Exception:
-                messages.appendleft(msg)  # Re-insert at front to retry immediately
-                break
-        await asyncio.sleep(0.1) 
+        # assert sent <= messages
+        if len(sent) == len(messages):
+            async with cond:
+                # Wait for the next update to our message set.
+                await cond.wait_for(lambda: len(sent) != len(messages))
+
+        to_send = messages - sent
+        body = {"type": "broadcast_many", "messages": list(to_send)}
+        resp = await node.rpc(neighbor, body)
+        if resp["type"] == "broadcast_many_ok":
+            sent.update(to_send)
 
 @node.handler
 async def broadcast(req: Request) -> Body:
-    message = req.body["message"]
-    if message in seen:
-        return {"type": "broadcast_ok"}
-
-    async with messages_lock:
-        seen.add(message)
-
-    # Queue messages for peers
-    for peer in peers: 
-        if peer != req.src and peer != node.node_id:
-            pending_messages[peer].append(message)
+    """Handle broadcast request"""
+    msg = req.body["message"]
+    await add_message({msg})
     return {"type": "broadcast_ok"} 
+
+@node.handler
+async def broadcast_many(req: Request) -> Body:
+    """Handle broadcast_many request"""
+    msg = req.body["messages"]
+    await add_message(set(msg))
+    return {"type": "broadcast_many_ok"} 
 
 @node.handler
 async def read(req: Request) -> Body:
     """Return all seen messages in sorted order"""
-    async with messages_lock:
-        temp = sorted(seen)
-    return {"type": "read_ok", "messages": temp}
+    return {"type": "read_ok", "messages": list(messages)}
 
 @node.handler
 async def topology(req: Request) -> Body:
     """Store the topology and start retry worker"""
-    global peers
-    peers = set(req.body["topology"].get(node.node_id, []))
+    neighbors = req.body["topology"][node.node_id]
     # Start broadcast worker for each peer
-    for p in peers:
-        node.spawn(worker(p))
+    for n in neighbors:
+        node.spawn(worker(n))
     return {"type": "topology_ok"}
 
 if __name__ == "__main__":
